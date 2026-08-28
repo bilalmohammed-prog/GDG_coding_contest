@@ -1,7 +1,9 @@
 // src/index.ts
+import 'dotenv/config';
 import express from 'express';
 import { submissionQueue } from './queue.js';
 import { supabase } from './supabase.js';
+
 const app = express();
 app.use(express.json());
 app.get('/users', async (_req, res) => {
