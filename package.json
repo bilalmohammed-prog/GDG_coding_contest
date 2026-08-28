@@ -1,0 +1,28 @@
+{
+  "name": "gdg_coding_contest",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start:api": "npx tsx src/index.ts",
+    "start:worker": "npx tsx src/worker.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "bullmq": "^6.3.1",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "ioredis": "^6.0.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.4.0",
+    "pm2": "^7.0.4",
+    "tsx": "^4.23.12",
+    "typescript": "^7.0.2"
+  }
+}
