@@ -1,9 +1,22 @@
 // src/index.ts
 import express from 'express';
 import { submissionQueue } from './queue.js';
-
+import { supabase } from './supabase.js';
 const app = express();
 app.use(express.json());
+app.get('/users', async (_req, res) => {
+  const { data, error } = await supabase
+    .from('users')
+    .select('*');
+
+  if (error) {
+    return res.status(500).json({ error: error.message });
+  }
+
+  res.json(data);
+});
+
+
 
 // 1. Submit Code Route
 app.post('/api/submit', async (req, res) => {
