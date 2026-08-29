@@ -381,7 +381,8 @@ console.log(
     console.log(
   `[Worker] Finished #${jobId}: ${finalResult.status} | ` +
   `Score: ${finalResult.score} | ` +
-  `Instructions: ${finalResult.instructions}`,
+  `Instructions: ${finalResult.instructions} | ` +
+  `Error: ${finalResult.error}`,
 );
 
     return finalResult;
