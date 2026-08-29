@@ -19,6 +19,7 @@ export type Database = {
           created_at: string
           id: number
           instruction_count: number | null
+          problem_id: string | null
           score: number
           user_id: number
         }
@@ -26,6 +27,7 @@ export type Database = {
           created_at?: string
           id?: number
           instruction_count?: number | null
+          problem_id?: string | null
           score: number
           user_id: number
         }
@@ -33,6 +35,7 @@ export type Database = {
           created_at?: string
           id?: number
           instruction_count?: number | null
+          problem_id?: string | null
           score?: number
           user_id?: number
         }
@@ -43,6 +46,7 @@ export type Database = {
       leaderboard: {
         Row: {
           rank: number | null
+          total_instructions: number | null
           total_score: number | null
           user_id: number | null
         }
