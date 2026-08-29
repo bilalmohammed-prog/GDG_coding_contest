@@ -233,39 +233,37 @@ export const worker = new Worker(
         throw new Error('__handled__');
       }
 
-      // ------------------------------------------------------
-      // Walk results, fail-fast on first bad test case.
-      // Accumulate score only for tests that actually pass;
-      // if we break early, remaining tests contribute nothing
-      // and the all-passed bonus is never awarded (status
-      // won't be ACCEPTED at the end).
+           // ------------------------------------------------------
+      // Walk EVERY test case (no early break) so we can award
+      // partial credit. Each test that passes contributes to
+      // scoreAccumulated regardless of what happens to the
+      // others. We remember the FIRST failure only, to report
+      // as the headline error message.
       // ------------------------------------------------------
 
       let totalInstructions = 0;
       let scoreAccumulated = 0;
-      let allTestsRan = true;
+      let passedCount = 0;
+      let firstFailure: { index: number; status: JudgeResult['status']; message: string } | null = null;
 
       for (let i = 0; i < problem.testCases.length; i++) {
         const testCase = problem.testCases[i]!;
         const testResult = driverResults[i];
 
         if (!testResult) {
-          finalResult.status = 'RUNTIME_ERROR';
-          finalResult.error = `Missing result for test case ${i + 1}`;
-          allTestsRan = false;
-          break;
+          if (!firstFailure) {
+            firstFailure = { index: i, status: 'RUNTIME_ERROR', message: `Missing result for test case ${i + 1}` };
+          }
+          continue; // don't break — still check remaining tests
         }
 
         if (!testResult.ok) {
-          if (testResult.error === 'TIME_LIMIT_EXCEEDED') {
-            finalResult.status = 'TIME_LIMIT_EXCEEDED';
-            finalResult.error = `Time Limit Exceeded on test case ${i + 1} (${TIME_LIMIT_SECONDS}.0s limit reached)`;
-          } else {
-            finalResult.status = 'RUNTIME_ERROR';
-            finalResult.error = `Runtime error on test case ${i + 1}: ${testResult.error}`;
+          if (!firstFailure) {
+            firstFailure = testResult.error === 'TIME_LIMIT_EXCEEDED'
+              ? { index: i, status: 'TIME_LIMIT_EXCEEDED', message: `Time Limit Exceeded on test case ${i + 1} (${TIME_LIMIT_SECONDS}.0s limit reached)` }
+              : { index: i, status: 'RUNTIME_ERROR', message: `Runtime error on test case ${i + 1}: ${testResult.error}` };
           }
-          allTestsRan = false;
-          break;
+          continue;
         }
 
         let actual: unknown;
@@ -273,24 +271,21 @@ export const worker = new Worker(
         try {
           actual = problem.validateOutput(testResult.output);
         } catch (err: any) {
-          finalResult.status = 'WRONG_ANSWER';
-          finalResult.error = `Invalid output on test case ${i + 1}: ${err.message}`;
-          allTestsRan = false;
-          break;
+          if (!firstFailure) {
+            firstFailure = { index: i, status: 'WRONG_ANSWER', message: `Invalid output on test case ${i + 1}: ${err.message}` };
+          }
+          continue;
         }
 
         if (!problem.answersMatch(actual, testCase)) {
-          finalResult.status = 'WRONG_ANSWER';
-          finalResult.error = `Wrong answer on test case ${i + 1}`;
-          finalResult.output = JSON.stringify({
-            actual,
-            exampleValid: problem.getExpectedAnswer?.(testCase), // one valid answer, for display only
-          });
-          allTestsRan = false;
-          break;
+          if (!firstFailure) {
+            firstFailure = { index: i, status: 'WRONG_ANSWER', message: `Wrong answer on test case ${i + 1}` };
+          }
+          continue;
         }
 
-        // Test case passed — count it toward instructions + score.
+        // This test case passed — count it toward instructions + score.
+        passedCount++;
         totalInstructions += testResult.instructions;
         const ratio = problem.scoringReferenceInstructions / testResult.instructions;
         scoreAccumulated += Math.min(POINTS_PER_TEST, ratio * POINTS_PER_TEST);
@@ -302,10 +297,29 @@ export const worker = new Worker(
 
       finalResult.instructions = totalInstructions;
 
-      if (allTestsRan && finalResult.status === 'ACCEPTED') {
-        finalResult.score = Math.round(
-          (scoreAccumulated + ALL_PASSED_BONUS) * 100,
-        ) / 100;
+      // ------------------------------------------------------
+      // Assign final status + score based on how many tests
+      // passed:
+      //   - ALL passed  -> ACCEPTED, full score + bonus
+      //   - SOME passed -> WRONG_ANSWER, partial score, no bonus
+      //   - NONE passed -> whatever the first failure's status
+      //                    was (RUNTIME_ERROR / TLE / WRONG_ANSWER),
+      //                    score 0
+      // ------------------------------------------------------
+
+      const allPassed = passedCount === problem.testCases.length;
+
+      if (allPassed) {
+        finalResult.status = 'ACCEPTED';
+        finalResult.score = Math.round((scoreAccumulated + ALL_PASSED_BONUS) * 100) / 100;
+      } else if (passedCount > 0) {
+        finalResult.status = 'WRONG_ANSWER';
+        finalResult.score = Math.round(scoreAccumulated * 100) / 100;
+        finalResult.error = firstFailure?.message ?? 'Some test cases failed';
+      } else {
+        finalResult.status = firstFailure?.status ?? 'WRONG_ANSWER';
+        finalResult.score = 0;
+        finalResult.error = firstFailure?.message ?? 'All test cases failed';
       }
     } catch (err: any) {
       // '__handled__' means finalResult was already set above;
@@ -315,7 +329,7 @@ export const worker = new Worker(
         finalResult.error = err.message || 'Unknown error';
       }
     } finally {
-  if (finalResult.status === 'ACCEPTED') {
+    if (finalResult.score > 0) {
     const { error: dbError } = await supabase.from('submissions').insert({
       user_id,
       score: finalResult.score,
