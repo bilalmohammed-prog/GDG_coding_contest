@@ -4,8 +4,11 @@ import random
 import httpx
 
 API_URL = "http://localhost:3000/api/submit"
+STATUS_URL = "http://localhost:3000/api/submission"
+PROBLEM_ID = "top-k-frequent"
 TOTAL_SUBMISSIONS = 100
-
+POLL_INTERVAL = 1.0
+POLL_TIMEOUT = 60.0
 
 # ============================================================
 # 100 realistic contestant submissions
@@ -1643,6 +1646,7 @@ async def send_submission(client, index, code):
     payload = {
         "language": "python",
         "code": code,
+        "problemId": PROBLEM_ID,
     }
 
     try:
@@ -1655,22 +1659,182 @@ async def send_submission(client, index, code):
         response.raise_for_status()
 
         data = response.json()
+        submission_id = data.get("submissionId")
 
         print(
             f"[Job {index + 1:03d}] "
-            f"Queued -> "
-            f"{data.get('submissionId')}"
+            f"Queued -> {submission_id}"
         )
 
-        return True
+        return submission_id
 
     except Exception as e:
         print(
             f"[Job {index + 1:03d}] "
-            f"Failed -> {e}"
+            f"Failed to queue -> {e}"
         )
 
-        return False
+        return None
+
+
+# ============================================================
+# Poll one submission until it reaches a terminal state
+# ============================================================
+
+async def poll_submission(client, index, submission_id):
+    if submission_id is None:
+        return {
+            "index": index,
+            "id": None,
+            "state": "queue_failed",
+            "status": None,
+            "score": None,
+            "error": None,
+        }
+
+    deadline = time.time() + POLL_TIMEOUT
+
+    while time.time() < deadline:
+        try:
+            response = await client.get(
+                f"{STATUS_URL}/{submission_id}",
+                timeout=10.0,
+            )
+            response.raise_for_status()
+            data = response.json()
+        except Exception as e:
+            return {
+                "index": index,
+                "id": submission_id,
+                "state": "poll_error",
+                "status": None,
+                "score": None,
+                "error": str(e),
+            }
+
+        state = data.get("state")
+
+        if state in ("completed", "failed"):
+            result = data.get("result") or {}
+            return {
+                "index": index,
+                "id": submission_id,
+                "state": state,
+                "status": result.get("status"),
+                "score": result.get("score"),
+                "error": result.get("error") or data.get("failedReason"),
+            }
+
+        await asyncio.sleep(POLL_INTERVAL)
+
+    return {
+        "index": index,
+        "id": submission_id,
+        "state": "poll_timeout",
+        "status": None,
+        "score": None,
+        "error": f"No terminal state after {POLL_TIMEOUT}s",
+    }
+
+
+
+# ============================================================
+# Submit one solution
+# ============================================================
+
+async def send_submission(client, index, code):
+    payload = {
+        "language": "python",
+        "code": code,
+        "problemId": PROBLEM_ID,
+    }
+
+    try:
+        response = await client.post(
+            API_URL,
+            json=payload,
+            timeout=10.0,
+        )
+
+        response.raise_for_status()
+
+        data = response.json()
+        submission_id = data.get("submissionId")
+
+        print(
+            f"[Job {index + 1:03d}] "
+            f"Queued -> {submission_id}"
+        )
+
+        return submission_id
+
+    except Exception as e:
+        print(
+            f"[Job {index + 1:03d}] "
+            f"Failed to queue -> {e}"
+        )
+
+        return None
+
+
+# ============================================================
+# Poll one submission until it reaches a terminal state
+# ============================================================
+
+async def poll_submission(client, index, submission_id):
+    if submission_id is None:
+        return {
+            "index": index,
+            "id": None,
+            "state": "queue_failed",
+            "status": None,
+            "score": None,
+            "error": None,
+        }
+
+    deadline = time.time() + POLL_TIMEOUT
+
+    while time.time() < deadline:
+        try:
+            response = await client.get(
+                f"{STATUS_URL}/{submission_id}",
+                timeout=10.0,
+            )
+            response.raise_for_status()
+            data = response.json()
+        except Exception as e:
+            return {
+                "index": index,
+                "id": submission_id,
+                "state": "poll_error",
+                "status": None,
+                "score": None,
+                "error": str(e),
+            }
+
+        state = data.get("state")
+
+        if state in ("completed", "failed"):
+            result = data.get("result") or {}
+            return {
+                "index": index,
+                "id": submission_id,
+                "state": state,
+                "status": result.get("status"),
+                "score": result.get("score"),
+                "error": result.get("error") or data.get("failedReason"),
+            }
+
+        await asyncio.sleep(POLL_INTERVAL)
+
+    return {
+        "index": index,
+        "id": submission_id,
+        "state": "poll_timeout",
+        "status": None,
+        "score": None,
+        "error": f"No terminal state after {POLL_TIMEOUT}s",
+    }
 
 
 # ============================================================
@@ -1688,38 +1852,72 @@ async def main():
 
     async with httpx.AsyncClient() as client:
 
-        tasks = [
-            send_submission(
-                client,
-                i,
-                SOLUTIONS[i],
-            )
+        submit_tasks = [
+            send_submission(client, i, SOLUTIONS[i])
             for i in range(TOTAL_SUBMISSIONS)
         ]
 
-        results = await asyncio.gather(*tasks)
+        submission_ids = await asyncio.gather(*submit_tasks)
 
-    total_time = time.time() - start_time
+        queue_time = time.time() - start_time
 
-    successful = results.count(True)
-    failed = results.count(False)
+        successful = sum(1 for s in submission_ids if s is not None)
+        failed = TOTAL_SUBMISSIONS - successful
 
-    print("\n" + "=" * 50)
-    print("📊 API QUEUING METRICS")
-    print("=" * 50)
+        print("\n" + "=" * 50)
+        print("📊 API QUEUING METRICS")
+        print("=" * 50)
+        print(f"Total Sent          : {TOTAL_SUBMISSIONS}")
+        print(f"Successfully Queued : {successful}")
+        print(f"Failed              : {failed}")
+        print(f"Time Taken          : {queue_time:.2f}s")
+        if queue_time > 0:
+            print(f"API Throughput      : {TOTAL_SUBMISSIONS / queue_time:.2f} req/sec")
+        print("=" * 50)
 
-    print(f"Total Sent          : {TOTAL_SUBMISSIONS}")
-    print(f"Successfully Queued : {successful}")
-    print(f"Failed              : {failed}")
-    print(f"Time Taken          : {total_time:.2f}s")
+        print(f"\n⏳ Polling {successful} jobs for results (timeout {POLL_TIMEOUT:.0f}s each)...\n")
 
-    if total_time > 0:
-        print(
-            f"API Throughput      : "
-            f"{TOTAL_SUBMISSIONS / total_time:.2f} req/sec"
-        )
+        poll_start = time.time()
 
-    print("=" * 50)
+        poll_tasks = [
+            poll_submission(client, i, submission_ids[i])
+            for i in range(TOTAL_SUBMISSIONS)
+        ]
+
+        results = await asyncio.gather(*poll_tasks)
+
+        poll_time = time.time() - poll_start
+
+    # --------------------------------------------------------
+    # Summary
+    # --------------------------------------------------------
+
+    status_counts = {}
+    for r in results:
+        key = r["status"] or r["state"]
+        status_counts[key] = status_counts.get(key, 0) + 1
+
+    print("\n" + "=" * 70)
+    print("📊 JUDGE RESULT SUMMARY")
+    print("=" * 70)
+    print(f"Polling Time         : {poll_time:.2f}s\n")
+
+    for key, count in sorted(status_counts.items(), key=lambda x: -x[1]):
+        print(f"{key:25s} : {count}")
+
+    print("\n" + "-" * 70)
+    print(f"{'Idx':>4} {'Status':18} {'Score':>7} {'Error'}")
+    print("-" * 70)
+
+    for r in sorted(results, key=lambda x: x["index"]):
+        idx = r["index"] + 1
+        status = r["status"] or r["state"]
+        score = r["score"] if r["score"] is not None else "-"
+        error = (r["error"] or "")[:60]
+        print(f"{idx:>4} {status:18} {score!s:>7} {error}")
+
+    print("=" * 70)
+
 
 
 if __name__ == "__main__":

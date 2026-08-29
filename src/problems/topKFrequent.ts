@@ -1,3 +1,5 @@
+import type { ProblemModule } from './types.js';
+
 export type TestCase = {
   nums: number[];
   k: number;
@@ -6,7 +8,7 @@ export type TestCase = {
 export type DriverTestResult =
   | { ok: true; output: unknown }
   | { ok: false; error: string };
-
+export const SCORING_REFERENCE_INSTRUCTIONS = 1000000; // Reference instruction count for scoring
 export const TEST_CASES: TestCase[] = [
   { nums: [1, 1, 1, 2, 2, 3], k: 2 },
 
@@ -131,3 +133,21 @@ export function answersMatch(
 
   return true;
 }
+
+// ------------------------------------------------------------
+// ProblemModule adapter — wraps the functions above so the
+// generic worker can drive this problem without knowing its
+// internal shape.
+// ------------------------------------------------------------
+
+export const topKFrequentProblem: ProblemModule<TestCase, number[]> = {
+  id: 'top-k-frequent',
+  entryFunctionName: 'topKFrequent',
+  testCases: TEST_CASES,
+  scoringReferenceInstructions: SCORING_REFERENCE_INSTRUCTIONS,
+  validateOutput,
+  answersMatch: (actual, testCase) =>
+    answersMatch(actual, testCase.nums, testCase.k),
+  getExpectedAnswer: (testCase) =>
+    getExpectedAnswer(testCase.nums, testCase.k),
+};

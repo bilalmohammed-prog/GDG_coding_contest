@@ -3,6 +3,7 @@ import 'dotenv/config';
 import express from 'express';
 import { submissionQueue } from './queue.js';
 import { supabase } from './supabase.js';
+import { PROBLEM_REGISTRY } from './problems/index.js';
 
 const app = express();
 app.use(express.json());
@@ -24,15 +25,19 @@ app.get('/users', async (_req, res) => {
 app.post('/api/submit', async (req, res) => {
   const { code, language, problemId } = req.body;
 
-  if (!code || !language) {
-    return res.status(400).json({ error: 'Missing code or language' });
+  if (!code || !language || !problemId) {
+    return res.status(400).json({ error: 'Missing code, language, or problemId' });
+  }
+
+  if (!PROBLEM_REGISTRY[problemId]) {
+    return res.status(400).json({ error: `Unknown problemId: ${problemId}` });
   }
 
   // Add job to BullMQ queue
   const job = await submissionQueue.add('eval-job', {
     code,
     language,
-    problemId: problemId || 'default-problem',
+    problemId,
     timestamp: Date.now(),
   });
 
@@ -45,20 +50,28 @@ app.post('/api/submit', async (req, res) => {
 // 2. Poll Status Route (Optional endpoint to check job state)
 app.get('/api/submission/:id', async (req, res) => {
   const job = await submissionQueue.getJob(req.params.id);
-  
+
   if (!job) {
     return res.status(404).json({ error: 'Submission not found' });
   }
 
   const state = await job.getState();
+
+  // BullMQ can report state=completed a moment before returnvalue
+  // is fully persisted. Re-fetch once if we see that race.
+  let returnvalue = job.returnvalue;
+  if (state === 'completed' && !returnvalue) {
+    const refreshed = await submissionQueue.getJob(req.params.id);
+    returnvalue = refreshed?.returnvalue ?? null;
+  }
+
   return res.json({
     id: job.id,
-    state, // 'completed', 'failed', 'active', 'waiting'
-    result: job.returnvalue || null,
+    state,
+    result: returnvalue || null,
     failedReason: job.failedReason || null,
   });
 });
-
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 API Server running on http://localhost:${PORT}`);
