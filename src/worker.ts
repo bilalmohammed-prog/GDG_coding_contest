@@ -328,20 +328,52 @@ export const worker = new Worker(
         finalResult.status = 'RUNTIME_ERROR';
         finalResult.error = err.message || 'Unknown error';
       }
-    } finally {
-    if (finalResult.score > 0) {
-    const { error: dbError } = await supabase.from('submissions').insert({
-      user_id,
-      score: finalResult.score,
-      instruction_count: finalResult.instructions,
-    });
+    }  finally {
+  if (finalResult.score > 0) {
+    const { data: existing, error: fetchError } = await supabase
+      .from('submissions')
+      .select('score, instruction_count')
+      .eq('user_id', user_id)
+      .eq('problem_id', problemId)
+      .maybeSingle();
+console.log(
+  `[DB] Job #${jobId} user=${user_id} score=${finalResult.score} instructions=${finalResult.instructions}`
+);
+    if (fetchError) {
+      console.error(`[Worker] Failed to check existing submission #${jobId}:`, fetchError.message);
+    } else {
+      const isBetter =
+        !existing ||
+        finalResult.score > existing.score ||
+        (finalResult.score === existing.score &&
+          finalResult.instructions < existing.instruction_count);
 
-    if (dbError) {
-      console.error(`[Worker] Failed to persist submission #${jobId}:`, dbError.message);
+      if (isBetter) {
+        const { error: upsertError } = await supabase
+          .from('submissions')
+          .upsert(
+            {
+              user_id,
+              problem_id: problemId,
+              score: finalResult.score,
+              instruction_count: finalResult.instructions,
+            },
+            { onConflict: 'user_id,problem_id' },
+          );
+
+        if (upsertError) {
+          console.error(`[Worker] Failed to persist submission #${jobId}:`, upsertError.message);
+        }else {
+  console.log(
+    `[DB] UPSERT SUCCESS job=${jobId} user=${user_id} score=${finalResult.score}`,
+  );
+}
+      }
     }
   }
 
   await fs.rm(tmpDir, { recursive: true, force: true });
+
 }
 
   
