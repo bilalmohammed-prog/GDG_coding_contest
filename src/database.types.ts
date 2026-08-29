@@ -17,22 +17,22 @@ export type Database = {
       submissions: {
         Row: {
           created_at: string
-          execution_time_ms: number | null
           id: number
+          instruction_count: number | null
           score: number
           user_id: number
         }
         Insert: {
           created_at?: string
-          execution_time_ms?: number | null
           id?: number
+          instruction_count?: number | null
           score: number
           user_id: number
         }
         Update: {
           created_at?: string
-          execution_time_ms?: number | null
           id?: number
+          instruction_count?: number | null
           score?: number
           user_id?: number
         }

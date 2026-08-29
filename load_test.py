@@ -1660,6 +1660,7 @@ async def send_submission(client, index, code):
         "language": "python",
         "code": code,
         "problemId": PROBLEM_ID,
+        "user_id": (index % 100) + 1,
     }
 
     try:

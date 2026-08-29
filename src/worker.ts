@@ -1,4 +1,6 @@
 // src/worker.ts
+import 'dotenv/config';
+import { supabase } from './supabase.js';
 
 import { Worker, Job } from 'bullmq';
 import { redisConnection } from './queue.js';
@@ -8,7 +10,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { getProblem } from './problems/index.js';
-
+//
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -24,8 +26,7 @@ type JudgeResult = {
   status: 'ACCEPTED' | 'WRONG_ANSWER' | 'TIME_LIMIT_EXCEEDED' | 'RUNTIME_ERROR';
   output: string;
   error: string;
-  executionTimeMs: number;
-  instructions: number; // sum across all test cases, for display
+  instructions: number;
   score: number;
 };
 
@@ -129,8 +130,9 @@ export const worker = new Worker(
   'code-submissions',
 
   async (job: Job) => {
-    const { code, language, problemId } = job.data;
+    const { code, language, problemId, user_id } = job.data;
     const jobId = job.id;
+    
 
     console.log(`[Worker PID=${process.pid}] Executing submission #${jobId} (problem=${problemId})`);
 
@@ -140,13 +142,12 @@ export const worker = new Worker(
     const startTime = Date.now();
 
     let finalResult: JudgeResult = {
-      status: 'ACCEPTED',
-      output: '',
-      error: '',
-      executionTimeMs: 0,
-      instructions: 0,
-      score: 0,
-    };
+  status: 'ACCEPTED',
+  output: '',
+  error: '',
+  instructions: 0,
+  score: 0,
+};
 
     try {
       if (language !== 'python') {
@@ -314,17 +315,28 @@ export const worker = new Worker(
         finalResult.error = err.message || 'Unknown error';
       }
     } finally {
-      finalResult.executionTimeMs = Date.now() - startTime;
+  if (finalResult.status === 'ACCEPTED') {
+    const { error: dbError } = await supabase.from('submissions').insert({
+      user_id,
+      score: finalResult.score,
+      instruction_count: finalResult.instructions,
+    });
 
-      await fs.rm(tmpDir, { recursive: true, force: true });
+    if (dbError) {
+      console.error(`[Worker] Failed to persist submission #${jobId}:`, dbError.message);
     }
+  }
+
+  await fs.rm(tmpDir, { recursive: true, force: true });
+}
+
+  
 
     console.log(
-      `[Worker] Finished #${jobId}: ${finalResult.status} | ` +
-      `Score: ${finalResult.score} | ` +
-      `Instructions: ${finalResult.instructions} | ` +
-      `${finalResult.executionTimeMs}ms`,
-    );
+  `[Worker] Finished #${jobId}: ${finalResult.status} | ` +
+  `Score: ${finalResult.score} | ` +
+  `Instructions: ${finalResult.instructions}`,
+);
 
     return finalResult;
   },

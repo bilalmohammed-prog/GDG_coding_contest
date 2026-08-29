@@ -23,21 +23,21 @@ app.get('/users', async (_req, res) => {
 
 // 1. Submit Code Route
 app.post('/api/submit', async (req, res) => {
-  const { code, language, problemId } = req.body;
+  const { code, language, problemId, user_id } = req.body;
 
-  if (!code || !language || !problemId) {
-    return res.status(400).json({ error: 'Missing code, language, or problemId' });
+  if (!code || !language || !problemId || !user_id) {
+    return res.status(400).json({ error: 'Missing code, language, problemId, or user_id' });
   }
 
   if (!PROBLEM_REGISTRY[problemId]) {
     return res.status(400).json({ error: `Unknown problemId: ${problemId}` });
   }
 
-  // Add job to BullMQ queue
   const job = await submissionQueue.add('eval-job', {
     code,
     language,
     problemId,
+    user_id,
     timestamp: Date.now(),
   });
 
