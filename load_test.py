@@ -3,8 +3,8 @@ import json
 import time
 import httpx
 
-API_URL = "http://localhost:3000/api/submit"
-STATUS_URL = "http://localhost:3000/api/submission"
+API_URL = "https://gdg-coding-contest-bilalmohammed-prog.dormhost.app/api/submit"
+STATUS_URL = "https://gdg-coding-contest-bilalmohammed-prog.dormhost.app/api/submission"
 PROBLEM_ID = "top-k-frequent"
 TOTAL_SUBMISSIONS = 100
 POLL_INTERVAL = 1.0
