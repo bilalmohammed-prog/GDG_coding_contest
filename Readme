@@ -1,0 +1,322 @@
+# GDG VIT Chennai — Remote Runtime Environment (Speed-Coding Judge)
+
+A remote code execution and judging system built for GDG VIT Chennai's speed-coding
+event. Contestants submit Python solutions over HTTP; the system compiles/runs each
+submission inside an isolated Docker sandbox, scores it against a reference-instruction
+benchmark, and persists the best result per contestant to Supabase.
+
+**Live API:** `https://gdg-coding-contest-bilalmohammed-prog.dormhost.app`
+**Stack:** Node.js (TypeScript, ESM) · Express · BullMQ · Upstash Redis · Docker · Supabase (Postgres) · PM2
+
+---
+
+## 1. How It Works
+
+```
+Client → API server (Express) → BullMQ queue (Upstash Redis) → Worker pool (PM2)
+                                                                       │
+                                                                       ▼
+                                                        Docker judge container (per submission)
+                                                                       │
+                                                                       ▼
+                                                              Supabase (submissions table)
+```
+
+1. **Submit** — `POST /api/submit` validates the payload, checks the `problemId` exists
+   in the in-process `PROBLEM_REGISTRY`, and pushes a job (`code`, `language`,
+   `problemId`, `user_id`) onto a BullMQ queue (`code-submissions`) backed by Upstash
+   Redis. The API never runs contestant code itself — it only enqueues and returns a
+   `submissionId` immediately (`status: "QUEUED"`).
+2. **Poll** — `GET /api/submission/:id` reports BullMQ job state (`waiting` /
+   `active` / `completed` / `failed`) plus the judge's return value once available.
+3. **Judge** — a pool of BullMQ workers (`src/worker.ts`, concurrency `5` per worker
+   process, run under PM2 across `4` processes) pulls jobs off the queue. For each job:
+   - Wraps the contestant's function in a generated `driver.py` that loads
+     `tests.json`, calls the contestant's entry function per test case, and measures
+     **CPU instruction count** via `sys.settrace(..., f_trace_opcodes=True)` scoped to
+     the call and everything it invokes.
+   - Runs the driver in a locked-down, single-use Docker container (`contest-judge`,
+     built from `Dockerfile.judge`) via `execFile('docker', [...])` — one container per
+     *submission* (not per test case), with all test cases executed in-process inside
+     it.
+   - Parses the container's JSON stdout into per-test results and computes a score.
+4. **Persist** — if the submission scores above `0`, the worker compares it against the
+   contestant's existing best (`(user_id, problem_id)` is the upsert key) and only
+   overwrites Supabase if the new attempt is strictly better (higher score, or equal
+   score with a lower instruction count — i.e. a more efficient solution).
+
+### Sandbox constraints (per container)
+
+| Constraint | Value | Purpose |
+|---|---|---|
+| `--memory` | `128m` | caps memory blowups |
+| `--cpus` | `0.5` | throttles CPU-bound abuse |
+| `--pids-limit` | `20` | stops fork-bombs |
+| `--network=none` | — | no outbound network from contestant code |
+| `--read-only` + `--tmpfs /tmp` | `noexec,nosuid,16m` | contestant code can't write to or execute from disk |
+| per-test `SIGALRM` | 3s | kills a single hung test case without killing the container |
+| outer `timeout` | 30s | kills the *whole container* if something escapes the per-test alarm (e.g. code that traps/ignores `SIGALRM`) |
+| `PYTHONHASHSEED=0` | fixed | deterministic hashing → deterministic dict/set iteration order across runs |
+
+### Scoring model
+
+- Problem: **Top-K Frequent Elements** (LeetCode 347 equivalent), registered under
+  `problemId: "top-k-frequent"` in `src/problems/`. New problems plug in by
+  implementing the `ProblemModule` interface (`entryFunctionName`, `testCases`,
+  `validateOutput`, `answersMatch`) — the worker and driver-script generator are
+  problem-agnostic.
+- **Partial credit, not all-or-nothing.** Every test case is evaluated (no early
+  break), so a submission that passes 5/7 tests still banks points for those 5.
+- Each passing test contributes `min(1, scoringReferenceInstructions / instructionsUsed)`
+  points — faster (fewer-instruction) solutions score closer to `1.0` per test; slow
+  but correct solutions score less, but never zero.
+- Passing *all* tests adds a `+10` bonus and sets status `ACCEPTED`. Partial passes are
+  `WRONG_ANSWER` with the accumulated partial score. Zero passes fall back to the first
+  failure's status (`RUNTIME_ERROR` / `TIME_LIMIT_EXCEEDED` / `WRONG_ANSWER`) with score `0`.
+- **Tie-aware correctness check**: Top-K-Frequent can have multiple valid outputs when
+  the k-th and (k+1)-th most frequent elements are tied. `answersMatch` doesn't compare
+  against one fixed expected array — it recomputes the full frequency map and accepts
+  any output that (a) has exactly `k` elements, (b) contains only elements that actually
+  appear in `nums`, and (c) includes every element with frequency strictly greater than
+  the k-th frequency. This avoids unfairly failing correct-but-differently-ordered
+  answers.
+
+---
+
+## 2. Edge Cases & Failure Handling
+
+| Scenario | Handling |
+|---|---|
+| Infinite loop / `while True` | Per-test `SIGALRM` (3s) kills that test; if the contestant traps the signal, the outer container `timeout` (30s) kills the whole container and the job is marked `TIME_LIMIT_EXCEEDED` |
+| Memory overflow | `--memory=128m` + `--read-only` container; Docker OOM-kills the container, surfaced as `RUNTIME_ERROR` |
+| Memory/fork leaks, fork bombs | `--pids-limit=20` caps process count inside the container |
+| Malformed / non-JSON driver output | Caught explicitly, reported as `RUNTIME_ERROR: Malformed driver output` instead of crashing the worker |
+| Missing result for a test index (driver died mid-run) | Treated as a failure for that specific test only; remaining tests still evaluated |
+| Unsupported language | Rejected before a container is even spawned (`Unsupported language: ${language}`) |
+| Unknown `problemId` | Rejected at the API layer (`400`) before hitting the queue |
+| Process preemption / worker crash mid-job | BullMQ persists job state in Redis independently of the worker process; PM2 auto-restarts crashed worker processes; in-flight jobs are re-claimed rather than silently lost |
+| Concurrent submissions from the same user | Each job is independent; only the best-scoring result is upserted, so out-of-order completion of two submissions from the same user can't overwrite a better score with a worse one |
+| Zero-score submissions | Explicitly **not** inserted into `submissions` — a broken/failed submission never creates or clobbers a leaderboard row |
+| Race between `state=completed` and BullMQ persisting `returnvalue` | `/api/submission/:id` re-fetches the job once if it observes `completed` with no `returnvalue` yet, instead of returning a premature null result |
+| High concurrency load | 4 worker processes × 5 concurrency each = up to 20 simultaneous Docker executions; validated with `load_test.py` (100 concurrent submissions, see §5) |
+
+---
+
+## 3. Access Control
+
+This is a hackathon/event-scoped prototype, so access control is deliberately minimal —
+noted here explicitly rather than overstated:
+
+- The API is **unauthenticated** — any client that has the URL can `POST /api/submit`.
+  There is no API key, session, or per-user rate limit at the HTTP layer.
+- `user_id` is **client-supplied** in the request body and trusted as-is; it is only
+  used as an upsert key against the `submissions` table, not as an identity/auth token.
+- Isolation is enforced at the **execution layer, not the API layer**: contestant code
+  can't affect other submissions or the host because of the Docker sandbox constraints
+  in §1 (no network, capped memory/CPU/PIDs, read-only filesystem), not because of
+  request-level auth.
+- Supabase access uses the **publishable (anon) key** from the client (`src/supabase.ts`),
+  scoped by the project's Row Level Security policies rather than a service-role key —
+  the service role key is never exposed to the API/worker process boundary that faces
+  the public internet.
+- **Known gap / next step**: a per-participant submission token or simple rate limit on
+  `/api/submit` would be the natural next hardening step for a longer-running or
+  higher-stakes deployment.
+
+---
+
+## 4. Architecture Note: Why the Deployment Looks the Way It Does
+
+The original design (see whiteboard sketch in `/docs` if included) was:
+
+```
+Client → DormHost API server → Redis/BullMQ queue → Code evaluation workers (Docker) → Supabase
+```
+
+The actual deployed shape ended up **splitting the queue and the workers onto different
+infrastructure**, for reasons documented in §5 — in short: i was struggling to get DormHost (the API host) to create workers tha create docker containers and am not sure if its possible on the service, so only the machine running the PM2 worker processes are Docker-capable,
+and both sides talk to each other only through the shared Upstash Redis queue:
+
+```
+Client → DormHost (API only) → Upstash Redis (BullMQ queue) → Docker-capable worker host (PM2, 4 processes) → contest-judge container → Supabase
+```
+
+---
+
+## 5. Struggles & How They Were Resolved
+
+### Deployment & infrastructure
+- **Shared queue confusion**: moving from local Redis to hosted Upstash Redis meant
+  the API and worker no longer had an implicit local-only boundary — a worker running
+  anywhere that pointed at the same `REDIS_URL` would start consuming the same BullMQ
+  queue. Early on, DormHost was running **both** the API and a worker
+  (`start.sh` originally launched `start:worker` and `start:api` together), so the
+  DormHost-hosted worker was pulling jobs off the same queue as the Docker-capable
+  workers.
+- That DormHost-hosted worker then failed every job with `spawn docker ENOENT`, because
+  DormHost's runtime has no Docker daemon available to it — it can host a Node process,
+  but it can't exec `docker run`.
+- **Fix**: split the two concerns explicitly — DormHost only ever runs `start:api`
+  (`npm run start:api`), and the judging workers run separately, under PM2, on a host
+  that actually has Docker. `REDIS_URL` is the only thing connecting them. The lesson
+  that stuck: *"hosted BullMQ worker"* and *"Docker-capable worker"* are two different
+  infrastructure requirements, and a platform that satisfies one doesn't imply it
+  satisfies the other.
+
+### Worker / queue debugging
+- Chased why only some submissions were being processed/persisted, and why total row
+  counts in `submissions` changed unpredictably between runs (5, 13, 17, 22...).
+  Root cause traced back to the shared-queue issue above — jobs were sometimes being
+  picked up by the Docker-incapable DormHost worker and failing silently from the
+  client's point of view.
+- Managing 4 PM2 worker processes (`WORKER_CONCURRENCY = 5` each) meant distinguishing
+  a genuine worker crash/restart from an ordinary handled job failure (`RUNTIME_ERROR`,
+  `TIME_LIMIT_EXCEEDED`) — the latter is expected and shouldn't be treated as an
+  incident. This came down to reading PM2 restart counts and logs (`pm2 logs`,
+  `pm2 list`) rather than inferring health from job outcomes.
+- Confirmed via `pm2 env` / process inspection that `PATH` and Docker availability
+  differed between hosts, which is what first pointed at the DormHost-worker theory.
+
+### Docker / judge debugging
+- Debugged an intermittent `spawn docker ENOENT` that turned out to be **environment-
+  dependent** (present on DormHost, absent on the Docker-capable host), not a bug in
+  `Dockerfile.judge` itself.
+- Verified Docker was actually installed and on `PATH` on the correct host with
+  `which docker` (`/usr/bin/docker`), and verified Node could spawn it successfully via
+  `execFile` in isolation before trusting the full worker pipeline.
+- Once confirmed the failure happened *before* the `contest-judge` image even started a
+  container, the search moved off `Dockerfile.judge` entirely and onto the host/
+  environment split — the actual fix.
+- At full load (4 workers × 5 concurrency), that's up to 20 simultaneous
+  `docker run` executions — validated deliberately rather than assumed safe.
+
+### Scoring / submissions
+- Designed partial scoring instead of all-or-nothing so a submission that fails a later
+  test case doesn't lose credit for the earlier ones it passed (see §1, "no early break").
+- Explicitly excluded `score === 0` submissions from ever being written to `submissions`,
+  so a broken run can't silently zero-out (or create noise around) a contestant's row.
+- Built the "is this attempt better?" comparison (`score`, then `instruction_count` as
+  tiebreaker) to reward efficiency, not just correctness, once a contestant is already
+  passing.
+- Some of the "missing" rows turned out to be intentional exclusions (zero-score
+  submissions), not lost data — this took cross-checking worker logs against the
+  `submissions` table to confirm.
+
+### Local vs. cloud testing
+- Rewrote `load_test.py` to target the deployed DormHost URL instead of `localhost:3000`.
+- Needed a way for evaluators to run the load test **without cloning the full repo**;
+  settled on piping the raw file straight from GitHub:
+  ```bash
+  curl -s https://raw.githubusercontent.com/bilalmohammed-prog/GDG_coding_contest/main/load_test.py | python3
+  ```
+- Hit Debian/Ubuntu's PEP 668 "externally-managed-environment" error installing
+  `httpx` globally; resolved by installing into a virtualenv or with
+  `pip install httpx --break-system-packages` on the evaluator's machine.
+
+### Process / tooling
+- Learned the PM2 basics for managing the worker fleet (`pm2 start`, `pm2 stop all`,
+  `pm2 restart all`, `pm2 logs`).
+- `./start.sh: Permission denied` on a fresh checkout — fixed with `chmod +x start.sh`
+  (git doesn't always preserve the executable bit across clone/upload).
+- Clarified the difference between `start.sh` (runs worker + API together, meant for a
+  single-host/all-in-one setup — not what's used in the final split deployment),
+  `npm start` (aliases to `start:api` only), `start:api`, and `start:worker`.
+- DormHost's deployment detection needed an actual `"start"` script in `package.json`
+  to recognize the project as a runnable Node service — added `"start": "npm run start:api"`.
+- Debugged Redis connection-string formatting, including a subtle bug where a trailing
+  quote got percent-encoded into the `REDIS_URL` env var itself (`%22`), which
+  `ioredis` failed to parse silently until traced back through the raw env value.
+
+**Overall**, the central lesson was architectural: a system built and tested locally
+with Docker available everywhere doesn't decompose cleanly the moment Redis, the API,
+and the workers get split across environments with different capabilities. Making that
+split explicit (API-only host vs. Docker-capable worker host, connected only via the
+Upstash queue) was the actual fix underlying most of the individual bugs above.
+
+---
+
+## 6. Project Structure
+
+```
+src/
+  index.ts              # Express API: POST /api/submit, GET /api/submission/:id
+  worker.ts             # BullMQ worker: driver-script generation, Docker exec, scoring, persistence
+  queue.ts              # ioredis connection + BullMQ Queue definition
+  supabase.ts           # Supabase client (publishable/anon key)
+  database.types.ts     # Generated Supabase types (submissions table, leaderboard view)
+  problems/
+    types.ts            # ProblemModule interface — plug-in contract for new problems
+    index.ts             # PROBLEM_REGISTRY
+    topKFrequent.ts      # Top-K Frequent Elements: test cases, tie-aware answer checking
+Dockerfile.judge         # Sandboxed Python 3.10 image the judge runs contestant code in
+start.sh                 # Convenience script: runs API + worker together (single-host use only)
+load_test.py             # 100-submission concurrent load test against the deployed API
+```
+
+## 7. Environment Variables
+
+| Variable | Used by | Purpose |
+|---|---|---|
+| `REDIS_URL` | API + worker | Upstash Redis connection string for the BullMQ queue |
+| `SUPABASE_URL` | API + worker | Supabase project URL |
+| `SUPABASE_PUBLISHABLE_KEY` | API + worker | Supabase anon/publishable key (RLS-scoped) |
+| `PORT` | API | HTTP port (defaults to `3000`) |
+
+## 8. Running Locally
+
+```bash
+npm install
+
+# build the judge sandbox image once
+docker build -t contest-judge -f Dockerfile.judge .
+
+# terminal 1 — API only
+npm run start:api
+
+# terminal 2 — worker only (needs Docker available on this machine)
+npm run start:worker
+```
+
+`start.sh` runs both together and is convenient for a single-host local setup, but is
+**not** what production uses — production keeps the API and worker on separate hosts
+(see §4).
+
+## 9. API Reference
+
+**`POST /api/submit`**
+```json
+{
+  "code": "def topKFrequent(nums, k):\n    ...",
+  "language": "python",
+  "problemId": "top-k-frequent",
+  "user_id": 1
+}
+```
+→ `{ "status": "QUEUED", "submissionId": "123" }`
+
+**`GET /api/submission/:id`**
+→
+```json
+{
+  "id": "123",
+  "state": "completed",
+  "result": {
+    "status": "ACCEPTED",
+    "score": 62.5,
+    "instructions": 48213,
+    "error": ""
+  },
+  "failedReason": null
+}
+```
+
+## 10. Load Testing
+
+Simulates 100 concurrent contestants (mix of correct, inefficient, buggy, crashing, and
+deliberately slow/hanging submissions) against the live deployment, then polls every
+submission to a terminal state and prints throughput + a full status breakdown.
+
+```bash
+pip install httpx --break-system-packages   # or use a virtualenv
+curl -s https://raw.githubusercontent.com/bilalmohammed-prog/GDG_coding_contest/main/load_test.py | python3
+```
