@@ -65,3 +65,6 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 API Server running on http://localhost:${PORT}`);
 });
+
+
+export default app;
