@@ -3,8 +3,8 @@ import json
 import time
 import httpx
 
-API_URL = "https://gdg-coding-contest-6dnm-5xv6okg8n-bilal-mohammed-s-projects.vercel.app/api/submit"
-STATUS_URL = "https://gdg-coding-contest-6dnm-5xv6okg8n-bilal-mohammed-s-projects.vercel.app/api/submission"
+API_URL = "https://gdg-coding-contest-6dnm.vercel.app/api/submit"
+STATUS_URL = "https://gdg-coding-contest-6dnm.vercel.app/api/submission"
 PROBLEM_ID = "top-k-frequent"
 TOTAL_SUBMISSIONS = 500
 POLL_INTERVAL = 1.0
