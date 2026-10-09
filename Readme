@@ -5,7 +5,7 @@ event. Contestants submit Python solutions over HTTP; the system compiles/runs e
 submission inside an isolated Docker sandbox, scores it against a reference-instruction
 benchmark, and persists the best result per contestant to Supabase.
 
-**Live API:** `https://gdg-coding-contest-bilalmohammed-prog.dormhost.app`
+**Live API:** `https://gdg-coding-contest-6dnm-5xv6okg8n-bilal-mohammed-s-projects.vercel.app/`
 **Stack:** Node.js (TypeScript, ESM) · Express · BullMQ · Upstash Redis · Docker · Supabase (Postgres) · PM2
 
 ---
