@@ -1,6 +1,13 @@
 {
   // Visit https://aka.ms/tsconfig to read more about this file
   "compilerOptions": {
+    "strict": true,
+    "module": "nodenext",
+    "target": "esnext",
+    "lib": ["esnext"],
+    "types": ["node"],
+    "typeRoots": ["./node_modules/@types"],
+    "skipLibCheck": true,
     // File Layout
     // "rootDir": "./src",
     // "outDir": "./dist",
@@ -29,15 +36,10 @@
     // "noPropertyAccessFromIndexSignature": true,
 
     // Recommended Options
-    "strict": true,
+
     "jsx": "react-jsx",
 
     "noUncheckedSideEffectImports": true,
-
-    "module": "nodenext",
-    "target": "esnext",
-    "lib": ["esnext"],
-    "types": ["node"],
 
     "sourceMap": true,
     "declaration": true,
@@ -46,6 +48,5 @@
     "verbatimModuleSyntax": true,
     "isolatedModules": true,
     "moduleDetection": "force",
-    "skipLibCheck": true
   }
 }
