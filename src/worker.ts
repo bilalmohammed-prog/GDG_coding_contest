@@ -55,6 +55,7 @@ type DriverTestResult =
 // without privileged perf access.
 // ------------------------------------------------------------
 
+//injecting code to compute res
 function buildDriverScript(
   contestantCode: string,
   entryFunctionName: string,

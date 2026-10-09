@@ -7,18 +7,6 @@ import { PROBLEM_REGISTRY } from './problems/index.js';
 
 const app = express();
 app.use(express.json());
-app.get('/users', async (_req, res) => {
-  const { data, error } = await supabase
-    .from('users')
-    .select('*');
-
-  if (error) {
-    return res.status(500).json({ error: error.message });
-  }
-
-  res.json(data);
-});
-
 
 
 // 1. Submit Code Route
@@ -72,6 +60,7 @@ app.get('/api/submission/:id', async (req, res) => {
     failedReason: job.failedReason || null,
   });
 });
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 API Server running on http://localhost:${PORT}`);
